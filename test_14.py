@@ -24,14 +24,14 @@ from pytorch_lightning.loggers import CSVLogger
 from tqdm import tqdm
 
 
+
 logger = CSVLogger("logs_out", name="encoder_logs")
 
 
 batch_size = 64
 num_workers = 8
 max_epochs = 200
-z_dim = 2048
-
+z_dim = 1024
 
 
 class BarlowTwinsTransform:
@@ -96,37 +96,22 @@ def cifar10_normalization():
     return normalize
 
 
+train_transform = BarlowTwinsTransform(
+    train=True, input_height=32, gaussian_blur=False, jitter_strength=0.5, normalize=cifar10_normalization()
+)
+train_dataset = CIFAR10(root=".", train=True, download=True, transform=train_transform)
 
-class BarlowTwinsLoss(nn.Module):
-    def __init__(self, batch_size, lambda_coeff=5e-3, z_dim=128):
-        super().__init__()
+val_transform = BarlowTwinsTransform(
+    train=False, input_height=32, gaussian_blur=False, jitter_strength=0.5, normalize=cifar10_normalization()
+)
+val_dataset = CIFAR10(root=".", train=False, download=True, transform=train_transform)
 
-        self.z_dim = z_dim
-        self.batch_size = batch_size
-        self.lambda_coeff = lambda_coeff
-
-    def off_diagonal_ele(self, x):
-
-        # return a flattened view of the off-diagonal elements of a square matrix
-        n, m = x.shape
-        assert n == m
-        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-    def forward(self, z1, z2):
-        # N is the batch size ,    D is output dim of projection head
-        z1_norm = (z1 - torch.mean(z1, dim=0)) / torch.std(z1, dim=0) 
-        z2_norm = (z2 - torch.mean(z2, dim=0)) / torch.std(z2, dim=0)
-
-        cross_corr = torch.matmul(z1_norm.T, z2_norm) / self.batch_size
-
-        on_diag = torch.diagonal(cross_corr).add_(-1).pow_(2).sum()
-        off_diag = self.off_diagonal_ele(cross_corr).pow_(2).sum()
-
-        return on_diag + self.lambda_coeff * off_diag, on_diag, off_diag
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,pin_memory = True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True, pin_memory = True)
 
 
 class ProjectionHead(nn.Module):
-    def __init__(self, input_dim=1024, hidden_dim=1024, output_dim=2048):
+    def __init__(self, input_dim=1024, hidden_dim=1024, output_dim=1024):
         super().__init__()
 
         self.projection_head = nn.Sequential(
@@ -138,7 +123,8 @@ class ProjectionHead(nn.Module):
 
     def forward(self, x):
         return self.projection_head(x)
-    
+
+
 def fn(warmup_steps, step):
     if step < warmup_steps:
         return float(step) / float(max(1, warmup_steps))
@@ -151,7 +137,39 @@ def linear_warmup_decay(warmup_steps):
 
 
 
-class BarlowTwins(L.LightningModule):
+'''loss function'''
+
+class BarlowTwinsLoss(nn.Module):
+    def __init__(self, batch_size, lambda_coeff=5e-3, z_dim=128):
+        super().__init__()
+
+        self.z_dim = z_dim
+        self.batch_size = batch_size
+        self.lambda_coeff = lambda_coeff
+
+    def off_diagonal_ele(self, x):
+        # taken from: https://github.com/facebookresearch/barlowtwins/blob/main/main.py
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+    def forward(self, z1, z2):
+        # N x D, where N is the batch size and D is output dim of projection head
+        z1_norm = (z1 - torch.mean(z1, dim=0)) / torch.std(z1, dim=0)
+        z2_norm = (z2 - torch.mean(z2, dim=0)) / torch.std(z2, dim=0)
+
+        cross_corr = torch.mm(z1_norm.T, z2_norm) / self.batch_size
+
+        on_diag = torch.diagonal(cross_corr).add_(-1).pow_(2).sum()
+        off_diag = self.off_diagonal_ele(cross_corr).pow_(2).sum()
+
+        return on_diag + self.lambda_coeff * off_diag, on_diag, off_diag
+    
+
+''''encoder implementation'''
+
+class BarlowTwins(LightningModule):
     def __init__(
         self,
         encoder,
@@ -159,7 +177,7 @@ class BarlowTwins(L.LightningModule):
         num_training_samples,
         batch_size,
         lambda_coeff=5e-3,
-        z_dim=2048,
+        z_dim=128,
         learning_rate=1e-4,
         warmup_epochs=10,
         max_epochs=200,
@@ -191,7 +209,7 @@ class BarlowTwins(L.LightningModule):
         self.log("off_diag", off_diag.sum(), on_step=True, on_epoch=True, prog_bar= True, logger=logger)
 
         return loss
-
+    
     def training_step(self, batch, batch_idx):
         loss = self.shared_step(batch)
         self.log("train_loss", loss, on_step=True, on_epoch=False)
@@ -218,22 +236,33 @@ class BarlowTwins(L.LightningModule):
         return [optimizer], [scheduler]
     
 
-train_transform = BarlowTwinsTransform(
-    train=True, input_height=32, gaussian_blur=False, jitter_strength=0.5, normalize=cifar10_normalization()
-)
-train_dataset = CIFAR10(root=".", train=True, download=True, transform=train_transform)
 
-val_transform = BarlowTwinsTransform(
-    train=False, input_height=32, gaussian_blur=False, jitter_strength=0.5, normalize=cifar10_normalization()
-)
-val_dataset = CIFAR10(root=".", train=False, download=True, transform=train_transform)
+    
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,pin_memory = True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True, pin_memory = True)
+'''this is the classifier implementation'''
+class classifire(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_features=512, out_features=1024),
+            nn.ReLU(),
+            nn.Linear(in_features=1024, out_features=1024),
+            nn.ReLU(),
+            nn.Linear(in_features=1024, out_features=10),
+        )
+    
+    def forward(self, x:torch.Tensor):
+        x = self.block(x)
+        return x
 
+    
+''' this is the encoder training part'''
 
 
 encoder = resnet34()
+
+# for CIFAR10, replace the first 7x7 conv with smaller 3x3 conv and remove the first maxpool
 encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
 encoder.maxpool = nn.MaxPool2d(kernel_size=1, stride=1)
 
@@ -251,39 +280,29 @@ model = BarlowTwins(
     z_dim=z_dim,
 )
 
+
 checkpoint_callback = ModelCheckpoint(every_n_epochs=100, save_top_k=-1, save_last=True)
 
-trainer = L.Trainer(
+trainer = Trainer(
     max_epochs=max_epochs,
     accelerator="auto",
-    devices=1,
+    devices=1 if torch.cuda.is_available() else None,  # limiting got iPython runs
+    callbacks=[#online_finetuner,
+        checkpoint_callback],
     logger=logger
 )
 
+# uncomment this to train the model
+# this is done for the tutorial so that the notebook compiles
+trainer.fit(model, train_loader,)#val_loader)
 
-trainer.fit(model, train_loader, val_loader)
 
 
-class classifire(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(in_features=2048, out_features=1024),
-            nn.ReLU(),
-            nn.Linear(in_features=1024, out_features=1024),
-            nn.ReLU(),
-            nn.Linear(in_features=1024, out_features=10),
-        )
-    
-    def forward(self, x:torch.Tensor):
-        x = self.block(x)
-        return x
+'''this is the GoAI part'''
 
 classifire_model = classifire()
 
-'''the below methods are the 2 implemented optimizer and schedulers 
-we can shift between them '''
+
 ai_optimizer = torch.optim.Adam(classifire_model.parameters(), lr = 1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(ai_optimizer, 200)
 goai_loss_fn = nn.CrossEntropyLoss()
@@ -292,10 +311,7 @@ goai_loss_fn = nn.CrossEntropyLoss()
 # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(ai_optimizer, 200)
 
 
-
-running_loss = 0.0
-
-running_corrects = 0
+''''training loop for the classifier'''
 epochs =  100
 
 for epoch in tqdm(range(epochs)):
@@ -333,6 +349,8 @@ for epoch in tqdm(range(epochs)):
 
     print('Epoch: {} Loss: {:.4f} Acc: {:.4f}'.format(epoch,  epoch_loss, epoch_acc))
 
+
+    ''''test accuracy '''
 
 
 correct = 0
