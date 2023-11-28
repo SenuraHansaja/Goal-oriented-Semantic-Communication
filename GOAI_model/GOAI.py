@@ -4,10 +4,10 @@ import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
 '''
-this is the classifier model with 
+this is the Classifier model with 
     3 linear layers 
 '''
-class classifire(nn.Module):
+class classifier(nn.Module):
     def __init__(self):
         super().__init__()
         self.block = nn.Sequential(
