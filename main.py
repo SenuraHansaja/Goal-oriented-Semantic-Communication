@@ -75,9 +75,9 @@ trainer.fit(model, train_loader)
 
 
 ### moving to the classifier part
-classifire_model = classifire()
+classifier_model = classifier()
 
-ai_optimizer = torch.optim.Adam(classifire_model.parameters(), lr = 1e-4)
+ai_optimizer = torch.optim.Adam(classifier_model.parameters(), lr = 1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(ai_optimizer, 200)
 goai_loss_fn = nn.CrossEntropyLoss()
 
@@ -104,7 +104,7 @@ for epoch in tqdm(range(goai_epochs)):
         #y_pred = GOAI_model(encoder_out)
         
        # GOAI_model.to('cuda')
-        y_pred = classifire_model(input_to_goai)
+        y_pred = classifier_model(input_to_goai)
         _, preds = torch.max(y_pred, 1)
         
         loss = goai_loss_fn(y_pred, label)
